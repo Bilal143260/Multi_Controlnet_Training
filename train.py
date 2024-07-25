@@ -8,6 +8,8 @@ import random
 import shutil
 from pathlib import Path
 
+import itertools
+
 import accelerate
 import numpy as np
 import torch
@@ -368,7 +370,7 @@ def parse_args(input_args=None):
     )
     parser.add_argument("--lr_power", type=float, default=1.0, help="Power factor of the polynomial scheduler.")
     parser.add_argument(
-        "--use_8bit_adam", action="store_true", help="Whether or not to use 8-bit Adam from bitsandbytes."
+        "--use_8bit_adam", action="store_true", default=True, help="Whether or not to use 8-bit Adam from bitsandbytes."
     )
     parser.add_argument(
         "--dataloader_num_workers",
@@ -712,7 +714,8 @@ def main(args):
         accelerator.register_load_state_pre_hook(load_model_hook)
 
     vae.requires_grad_(False)
-    unet.requires_grad_(False)
+    # unet.requires_grad_(False)
+    unet.train()
     text_encoder.requires_grad_(False)
     controlnet.train()
 
@@ -768,7 +771,9 @@ def main(args):
         optimizer_class = torch.optim.AdamW
 
     # Optimizer creation
-    params_to_optimize = controlnet.parameters()
+    # params_to_optimize = controlnet.parameters()
+    params_to_optimize = itertools.chain(controlnet.parameters(), unet.parameters())
+    
     optimizer = optimizer_class(
         params_to_optimize,
         lr=args.learning_rate,
@@ -777,7 +782,7 @@ def main(args):
         eps=args.adam_epsilon,
     )
 
-    train_dataset = dataset = MyDataset(
+    train_dataset = MyDataset(
         json_file=args.json_file,
         tokenizer= tokenizer,
         image_root_path=args.image_root_path,
@@ -808,7 +813,7 @@ def main(args):
     )
 
     # Prepare everything with our `accelerator`.
-    controlnet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+    unet, controlnet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(unet, 
         controlnet, optimizer, train_dataloader, lr_scheduler
     )
 
@@ -822,7 +827,7 @@ def main(args):
 
     # Move vae, unet and text_encoder to device and cast to weight_dtype
     vae.to(accelerator.device, dtype=weight_dtype)
-    unet.to(accelerator.device, dtype=weight_dtype)
+    # unet.to(accelerator.device, dtype=weight_dtype)
     text_encoder.to(accelerator.device, dtype=weight_dtype)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
