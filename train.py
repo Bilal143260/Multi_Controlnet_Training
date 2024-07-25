@@ -237,7 +237,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--pretrained_model_name_or_path",
         type=str,
-        default= "runwayml/stable-diffusion-v1-5",
+        default="runwayml/stable-diffusion-v1-5",
         help="Path to pretrained model or model identifier from huggingface.co/models.",
     )
     parser.add_argument(
@@ -547,13 +547,13 @@ def parse_args(input_args=None):
 
     parser.add_argument(
         "--json_file",
-        type=int,
+        type=str,
         default="/workspace/control_net_data/control_net_train.json",
     )
 
     parser.add_argument(
         "--image_root_path",
-        type=int,
+        type=str,
         default="/workspace/control_net_data",
     )
 
