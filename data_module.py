@@ -106,13 +106,13 @@ def collate_fn(data):
 
 if __name__ == "__main__":
 
-    from transformers import CLIPTokenizer
+    from transformers import AutoTokenizer
 
     pretrained_model_name = "runwayml/stable-diffusion-v1-5"
     json_file = "/workspace/control_net_data/control_net_train.json"
     image_root_path = "/workspace/control_net_data"
 
-    tokenizer = CLIPTokenizer.from_pretrained(
+    tokenizer = AutoTokenizer.from_pretrained(
         pretrained_model_name, subfolder="tokenizer"
     )
 
