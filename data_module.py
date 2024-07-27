@@ -16,7 +16,7 @@ class MyDataset(Dataset):
         tokenizer,
         size=512,
         image_root_path="",
-        drop_rate=0.1  # Add drop rate parameter
+        drop_rate=0.2  # Add drop rate parameter
     ):
         super().__init__()
         self.tokenizer = tokenizer
