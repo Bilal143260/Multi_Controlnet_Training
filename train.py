@@ -811,7 +811,7 @@ def main(args):
 
     # Optimizer creation
     # params_to_optimize = controlnet.parameters()
-    params_to_optimize = itertools.chain(controlnet1.parameters(), controlnet2.parameters(), unet.parameters())
+    params_to_optimize = itertools.chain(unet.parameters(), controlnet1.parameters(), controlnet2.parameters())
     
     optimizer = optimizer_class(
         params_to_optimize,
