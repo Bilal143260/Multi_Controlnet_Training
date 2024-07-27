@@ -4,12 +4,11 @@ import gc
 import logging
 import math
 import os
+import json
 import random
 import shutil
 from pathlib import Path
-
 import itertools
-
 import accelerate
 import numpy as np
 import torch
@@ -62,22 +61,27 @@ def image_grid(imgs, rows, cols):
 
 
 def log_validation(
-    vae, text_encoder, tokenizer, unet, controlnet, args, accelerator, weight_dtype, step, is_final_validation=False
+    vae, text_encoder, tokenizer, unet, controlnet1, controlnet2, args, accelerator, weight_dtype, step, is_final_validation=False
 ):
     logger.info("Running validation... ")
 
     if not is_final_validation:
-        controlnet = accelerator.unwrap_model(controlnet)
+        controlnet1 = accelerator.unwrap_model(controlnet1)
+        controlnet2 = accelerator.unwrap_model(controlnet2)
+        unet = accelerator.unwrap_model(unet)
     else:
-        controlnet = ControlNetModel.from_pretrained(args.output_dir, torch_dtype=weight_dtype)
+        controlnet1 = ControlNetModel.from_pretrained(os.path.join(args.output_dir, "controlnet1"), torch_dtype=weight_dtype)
+        controlnet2 = ControlNetModel.from_pretrained(os.path.join(args.output_dir, "controlnet2"), torch_dtype=weight_dtype)
+        unet = UNet2DConditionModel.from_pretrained(os.path.join(args.output_dir, "unet"), torch_dtype=weight_dtype)
 
+    controlnets = [controlnet1,controlnet2]
     pipeline = StableDiffusionControlNetPipeline.from_pretrained(
         args.pretrained_model_name_or_path,
         vae=vae,
         text_encoder=text_encoder,
         tokenizer=tokenizer,
         unet=unet,
-        controlnet=controlnet,
+        controlnet=controlnets,
         safety_checker=None,
         revision=args.revision,
         variant=args.variant,
@@ -95,38 +99,33 @@ def log_validation(
     else:
         generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
 
-    if len(args.validation_image) == len(args.validation_prompt):
-        validation_images = args.validation_image
-        validation_prompts = args.validation_prompt
-    elif len(args.validation_image) == 1:
-        validation_images = args.validation_image * len(args.validation_prompt)
-        validation_prompts = args.validation_prompt
-    elif len(args.validation_prompt) == 1:
-        validation_images = args.validation_image
-        validation_prompts = args.validation_prompt * len(args.validation_image)
-    else:
-        raise ValueError(
-            "number of `args.validation_image` and `args.validation_prompt` should be checked in `parse_args`"
-        )
-
     image_logs = []
     inference_ctx = contextlib.nullcontext() if is_final_validation else torch.autocast("cuda")
 
-    for validation_prompt, validation_image in zip(validation_prompts, validation_images):
-        validation_image = Image.open(validation_image).convert("RGB")
+    #read json file
+    val_json_path = args.val_json_file
+    image_root_path = args.image_root_path
 
+    val_data = json.load(open(val_json_path))
+
+    for data in val_data:
+        controlnet1_image = Image.open(os.path.join(image_root_path,data["source_1"])).convert("RGB").resize((512,512))
+        controlnet2_image = Image.open(os.path.join(image_root_path,data["source_2"])).convert("RGB").resize((512,512))
+        validation_prompt = data["item"]
+
+        validation_images = [controlnet1_image, controlnet2_image]
         images = []
 
         for _ in range(args.num_validation_images):
             with inference_ctx:
                 image = pipeline(
-                    validation_prompt, validation_image, num_inference_steps=20, generator=generator
+                    validation_prompt, validation_images, num_inference_steps=20, generator=generator
                 ).images[0]
 
             images.append(image)
 
         image_logs.append(
-            {"validation_image": validation_image, "images": images, "validation_prompt": validation_prompt}
+            {"controlnet_1_image": controlnet1_image, "controlnet_2_image": controlnet2_image, "images": images, "validation_prompt": validation_prompt}
         )
 
     tracker_key = "test" if is_final_validation else "validation"
@@ -153,10 +152,11 @@ def log_validation(
             for log in image_logs:
                 images = log["images"]
                 validation_prompt = log["validation_prompt"]
-                validation_image = log["validation_image"]
+                controlnet_1_image = log["controlnet_1_image"]
+                controlnet_2_image = log["controlnet_2_image"]
 
-                formatted_images.append(wandb.Image(validation_image, caption="Controlnet conditioning"))
-
+                formatted_images.append(wandb.Image(controlnet_1_image, caption="Controlnet 1 conditioning"))
+                formatted_images.append(wandb.Image(controlnet_2_image, caption="Controlnet 2 conditioning"))
                 for image in images:
                     image = wandb.Image(image, caption=validation_prompt)
                     formatted_images.append(image)
@@ -413,7 +413,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--report_to",
         type=str,
-        default=None,
+        default="wandb",
         help=(
             'The integration to report the results and logs to. Supported platforms are `"tensorboard"`'
             ' (default), `"wandb"` and `"comet_ml"`. Use `"all"` to report to all integrations.'
@@ -531,7 +531,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--validation_steps",
         type=int,
-        default=100,
+        default=10,
         help=(
             "Run validation every X steps. Validation consists of running the prompt"
             " `args.validation_prompt` multiple times: `args.num_validation_images`"
@@ -555,11 +555,21 @@ def parse_args(input_args=None):
     )
 
     parser.add_argument(
+        "--val_json_file",
+        type=str,
+        default="/workspace/control_net_data/control_net_test.json",
+    )
+
+    parser.add_argument(
         "--image_root_path",
         type=str,
         default="/workspace/control_net_data",
     )
 
+    parser.add_argument(
+        "--do_validation",
+        default=True
+    )
     if input_args is not None:
         args = parser.parse_args(input_args)
     else:
@@ -1032,13 +1042,14 @@ def main(args):
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
-                    if args.validation_prompt is not None and global_step % args.validation_steps == 0:
+                    if args.do_validation is not None and global_step % args.validation_steps == 0:
                         image_logs = log_validation(
                             vae,
                             text_encoder,
                             tokenizer,
                             unet,
-                            controlnet,
+                            controlnet1,
+                            controlnet2,
                             args,
                             accelerator,
                             weight_dtype,
@@ -1064,13 +1075,14 @@ def main(args):
 
         # Run a final round of validation.
         image_logs = None
-        if args.validation_prompt is not None:
+        if args.do_validation is not None:
             image_logs = log_validation(
                 vae=vae,
                 text_encoder=text_encoder,
                 tokenizer=tokenizer,
-                unet=unet,
-                controlnet=None,
+                unet=None,
+                controlnet1=None,
+                controlnet2=None,
                 args=args,
                 accelerator=accelerator,
                 weight_dtype=weight_dtype,
