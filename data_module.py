@@ -26,7 +26,7 @@ class MyDataset(Dataset):
 
         self.target_transforms = transforms.Compose(
             [
-                transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
+                transforms.Resize((size,size), interpolation=transforms.InterpolationMode.BILINEAR),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
             ]
@@ -34,7 +34,7 @@ class MyDataset(Dataset):
 
         self.conditioning_transforms = transforms.Compose(
             [
-                transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
+                transforms.Resize((size,size), interpolation=transforms.InterpolationMode.BILINEAR),
                 transforms.ToTensor(),
             ]
         )
