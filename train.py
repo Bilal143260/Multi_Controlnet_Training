@@ -413,7 +413,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--report_to",
         type=str,
-        default="wandb",
+        default=None,
         help=(
             'The integration to report the results and logs to. Supported platforms are `"tensorboard"`'
             ' (default), `"wandb"` and `"comet_ml"`. Use `"all"` to report to all integrations.'
@@ -431,7 +431,8 @@ def parse_args(input_args=None):
         ),
     )
     parser.add_argument(
-        "--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers."
+        "--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers.",
+        default=True
     )
     parser.add_argument(
         "--set_grads_to_none",
@@ -671,10 +672,13 @@ def main(args):
 
     if args.controlnet_model_name_or_path:
         logger.info("Loading existing controlnet weights")
-        controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
+        controlnet1 = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
+        controlnet2 = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
     else:
         logger.info("Initializing controlnet weights from unet")
-        controlnet = ControlNetModel.from_unet(unet)
+        controlnet1 = ControlNetModel.from_unet(unet)
+        controlnet2 = ControlNetModel.from_unet(unet)
+
 
     # Taken from [Sayak Paul's Diffusers PR #6511](https://github.com/huggingface/diffusers/pull/6511/files)
     def unwrap_model(model):
@@ -687,26 +691,42 @@ def main(args):
         # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
         def save_model_hook(models, weights, output_dir):
             if accelerator.is_main_process:
-                i = len(weights) - 1
-
+                controlnet1_saved = False
+                controlnet2_saved = False
                 while len(weights) > 0:
+                    model = models.pop()
                     weights.pop()
-                    model = models[i]
 
-                    sub_dir = "controlnet"
+                    if isinstance(model, ControlNetModel):
+                        if not controlnet1_saved:
+                            sub_dir = "controlnet1"
+                            controlnet1_saved = True
+                        else:
+                            sub_dir = "controlnet2"
+                            controlnet2_saved = True
+                    elif isinstance(model, UNet2DConditionModel):
+                        sub_dir = "unet"
+                    else:
+                        raise ValueError("Unknown model type for saving")
+
                     model.save_pretrained(os.path.join(output_dir, sub_dir))
 
-                    i -= 1
 
         def load_model_hook(models, input_dir):
             while len(models) > 0:
-                # pop models so that they are not loaded again
                 model = models.pop()
+                if isinstance(model, ControlNetModel):
+                    if "controlnet1" in model.config["_name_or_path"]:
+                        sub_dir = "controlnet1"
+                    else:
+                        sub_dir = "controlnet2"
+                elif isinstance(model, UNet2DConditionModel):
+                    sub_dir = "unet"
+                else:
+                    raise ValueError("Unknown model type for loading")
 
-                # load diffusers style into model
-                load_model = ControlNetModel.from_pretrained(input_dir, subfolder="controlnet")
+                load_model = type(model).from_pretrained(input_dir, subfolder=sub_dir)
                 model.register_to_config(**load_model.config)
-
                 model.load_state_dict(load_model.state_dict())
                 del load_model
 
@@ -717,7 +737,8 @@ def main(args):
     # unet.requires_grad_(False)
     unet.train()
     text_encoder.requires_grad_(False)
-    controlnet.train()
+    controlnet1.train()
+    controlnet2.train()
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -729,12 +750,15 @@ def main(args):
                     "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
                 )
             unet.enable_xformers_memory_efficient_attention()
-            controlnet.enable_xformers_memory_efficient_attention()
+            controlnet1.enable_xformers_memory_efficient_attention()
+            controlnet2.enable_xformers_memory_efficient_attention()
         else:
             raise ValueError("xformers is not available. Make sure it is installed correctly")
 
     if args.gradient_checkpointing:
-        controlnet.enable_gradient_checkpointing()
+        unet.enable_gradient_checkpointing()
+        controlnet1.enable_gradient_checkpointing()
+        controlnet2.enable_gradient_checkpointing()
 
     # Check that all trainable models are in full precision
     low_precision_error_string = (
@@ -742,9 +766,9 @@ def main(args):
         " doing mixed precision training, copy of the weights should still be float32."
     )
 
-    if unwrap_model(controlnet).dtype != torch.float32:
+    if unwrap_model(controlnet1).dtype != torch.float32 or unwrap_model(controlnet2).dtype != torch.float32:
         raise ValueError(
-            f"Controlnet loaded as datatype {unwrap_model(controlnet).dtype}. {low_precision_error_string}"
+            f"Controlnet loaded as datatype {unwrap_model(controlnet1).dtype} or {unwrap_model(controlnet2).dtype}. {low_precision_error_string}"
         )
 
     # Enable TF32 for faster training on Ampere GPUs,
@@ -772,7 +796,7 @@ def main(args):
 
     # Optimizer creation
     # params_to_optimize = controlnet.parameters()
-    params_to_optimize = itertools.chain(controlnet.parameters(), unet.parameters())
+    params_to_optimize = itertools.chain(controlnet1.parameters(), controlnet2.parameters(), unet.parameters())
     
     optimizer = optimizer_class(
         params_to_optimize,
@@ -813,8 +837,8 @@ def main(args):
     )
 
     # Prepare everything with our `accelerator`.
-    unet, controlnet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(unet, 
-        controlnet, optimizer, train_dataloader, lr_scheduler
+    unet, controlnet1, controlnet2, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        unet, controlnet1, controlnet2, optimizer, train_dataloader, lr_scheduler
     )
 
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
@@ -900,7 +924,7 @@ def main(args):
     image_logs = None
     for epoch in range(first_epoch, args.num_train_epochs):
         for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(controlnet):
+            with accelerator.accumulate([controlnet1, controlnet2]):
                 # Convert images to latent space
                 latents = vae.encode(batch["target_imgs"].to(dtype=weight_dtype)).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
@@ -919,15 +943,33 @@ def main(args):
                 # Get the text embedding for conditioning
                 encoder_hidden_states = text_encoder(batch["text_input_ids"], return_dict=False)[0]
 
-                controlnet_image = batch["controlnet_1_imgs"].to(dtype=weight_dtype)
+                controlnet1_image = batch["controlnet_1_imgs"].to(dtype=weight_dtype)
+                controlnet2_image = batch["controlnet_2_imgs"].to(dtype=weight_dtype)
 
-                down_block_res_samples, mid_block_res_sample = controlnet(
+                # Get predictions from controlnet1
+                down_block_res_samples1, mid_block_res_sample1 = controlnet1(
                     noisy_latents,
                     timesteps,
                     encoder_hidden_states=encoder_hidden_states,
-                    controlnet_cond=controlnet_image,
+                    controlnet_cond=controlnet1_image,
                     return_dict=False,
                 )
+
+                # Get predictions from controlnet2
+                down_block_res_samples2, mid_block_res_sample2 = controlnet2(
+                    noisy_latents,
+                    timesteps,
+                    encoder_hidden_states=encoder_hidden_states,
+                    controlnet_cond=controlnet2_image,
+                    return_dict=False,
+                )
+
+                # Add the outputs of controlnet1 and controlnet2
+                down_block_res_samples = [
+                    res_sample1 + res_sample2
+                    for res_sample1, res_sample2 in zip(down_block_res_samples1, down_block_res_samples2)
+                ]
+                mid_block_res_sample = mid_block_res_sample1 + mid_block_res_sample2
 
                 # Predict the noise residual
                 model_pred = unet(
@@ -952,7 +994,8 @@ def main(args):
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    params_to_clip = controlnet.parameters()
+                    # Updated params_to_clip to include parameters from both controlnet1 and controlnet2
+                    params_to_clip = itertools.chain(unet.parameters(), controlnet1.parameters(), controlnet2.parameters())
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
@@ -1012,8 +1055,12 @@ def main(args):
     # Create the pipeline using using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        controlnet = unwrap_model(controlnet)
-        controlnet.save_pretrained(args.output_dir)
+        controlnet1 = unwrap_model(controlnet1)
+        controlnet1.save_pretrained(os.path.join(args.output_dir, "controlnet1"))
+        controlnet2 = unwrap_model(controlnet2)
+        controlnet2.save_pretrained(os.path.join(args.output_dir, "controlnet2"))
+        unet = unwrap_model(unet)
+        unet.save_pretrained(os.path.join(args.output_dir, "unet"))
 
         # Run a final round of validation.
         image_logs = None
