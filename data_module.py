@@ -16,17 +16,19 @@ class MyDataset(Dataset):
         tokenizer,
         size=512,
         image_root_path="",
+        drop_rate=0.1  # Add drop rate parameter
     ):
-        super().__init__
+        super().__init__()
         self.tokenizer = tokenizer
         self.size = size
         self.image_root_path = image_root_path
+        self.drop_rate = drop_rate  # Save drop rate
 
         self.data = json.load(open(json_file))
 
         self.target_transforms = transforms.Compose(
             [
-                transforms.Resize((size,size), interpolation=transforms.InterpolationMode.BILINEAR),
+                transforms.Resize((size, size), interpolation=transforms.InterpolationMode.BILINEAR),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
             ]
@@ -34,11 +36,10 @@ class MyDataset(Dataset):
 
         self.conditioning_transforms = transforms.Compose(
             [
-                transforms.Resize((size,size), interpolation=transforms.InterpolationMode.BILINEAR),
+                transforms.Resize((size, size), interpolation=transforms.InterpolationMode.BILINEAR),
                 transforms.ToTensor(),
             ]
         )
-
 
     def __getitem__(self, index):
         item = self.data[index]  # single object from json file
@@ -55,7 +56,11 @@ class MyDataset(Dataset):
         source_1_img_tensor = self.conditioning_transforms(raw_source_1_img)
         source_2_img_tensor = self.conditioning_transforms(raw_source_2_img)
 
-        prompt = f"a photo of {text}"
+        prompt = f"Silhouette of a person wearing {text} highlighted in white and the rest of the image, including the persom's body, is shaded in gray with black background"
+
+        # Apply drop rate for classifier-free guidance
+        if random.random() < self.drop_rate:
+            prompt = ""  # Drop the text prompt
 
         # get text and tokenize
         text_input_ids = self.tokenizer(
@@ -66,22 +71,11 @@ class MyDataset(Dataset):
             return_tensors="pt",
         ).input_ids
 
-        # drop
-        # drop_image_embed = 0
-        # rand_num = random.random()
-        # if rand_num < self.i_drop_rate:
-        #     drop_image_embed = 1
-        # elif rand_num < (self.i_drop_rate + self.t_drop_rate):
-        #     text = ""
-        # elif rand_num < (self.i_drop_rate + self.t_drop_rate + self.ti_drop_rate):
-        #     text = ""
-        #     drop_image_embed = 1
-
         return {
-             "target_img":target_img_tensor,
-             "controlnet_1_img": source_1_img_tensor,
-             "controlnet_2_img":source_2_img_tensor,
-             "text_input_ids": text_input_ids
+            "target_img": target_img_tensor,
+            "controlnet_1_img": source_1_img_tensor,
+            "controlnet_2_img": source_2_img_tensor,
+            "text_input_ids": text_input_ids
         }
 
     def __len__(self):
@@ -97,10 +91,10 @@ def collate_fn(data):
     )
 
     return {
-        "target_imgs":target_imgs,
-        "controlnet_1_imgs":controlnet_1_imgs,
-        "controlnet_2_imgs":controlnet_2_imgs,
-        "text_input_ids":text_input_ids
+        "target_imgs": target_imgs,
+        "controlnet_1_imgs": controlnet_1_imgs,
+        "controlnet_2_imgs": controlnet_2_imgs,
+        "text_input_ids": text_input_ids
     }
 
 

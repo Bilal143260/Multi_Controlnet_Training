@@ -111,7 +111,9 @@ def log_validation(
     for data in val_data:
         controlnet1_image = Image.open(os.path.join(image_root_path,data["source_1"])).convert("RGB").resize((512,512))
         controlnet2_image = Image.open(os.path.join(image_root_path,data["source_2"])).convert("RGB").resize((512,512))
-        validation_prompt = data["item"]
+        target_image = Image.open(os.path.join(image_root_path,data["target"])).convert("RGB").resize((512,512))
+        text = data["item"]
+        validation_prompt = f"Silhouette of a person wearing {text} highlighted in white and the rest of the image, including the persom's body, is shaded in gray with black background"
 
         validation_images = [controlnet1_image, controlnet2_image]
         images = []
@@ -125,7 +127,8 @@ def log_validation(
             images.append(image)
 
         image_logs.append(
-            {"controlnet_1_image": controlnet1_image, "controlnet_2_image": controlnet2_image, "images": images, "validation_prompt": validation_prompt}
+            {"controlnet_1_image": controlnet1_image, "controlnet_2_image": controlnet2_image, "images": images, 
+            "target_image":target_image, "validation_prompt": text}
         )
 
     tracker_key = "test" if is_final_validation else "validation"
@@ -154,9 +157,11 @@ def log_validation(
                 validation_prompt = log["validation_prompt"]
                 controlnet_1_image = log["controlnet_1_image"]
                 controlnet_2_image = log["controlnet_2_image"]
+                target_image = log["target_image"]
 
                 formatted_images.append(wandb.Image(controlnet_1_image, caption="Controlnet 1 conditioning"))
                 formatted_images.append(wandb.Image(controlnet_2_image, caption="Controlnet 2 conditioning"))
+                formatted_images.append(wandb.Image(target_image, caption="Target Image"))
                 for image in images:
                     image = wandb.Image(image, caption=validation_prompt)
                     formatted_images.append(image)
@@ -525,7 +530,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--num_validation_images",
         type=int,
-        default=4,
+        default=2,
         help="Number of images to be generated for each `--validation_image`, `--validation_prompt` pair",
     )
     parser.add_argument(
